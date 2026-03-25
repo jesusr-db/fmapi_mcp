@@ -34,6 +34,12 @@ def get_credentials() -> tuple[str, str]:
     Creates a fresh WorkspaceClient so the SDK handles OAuth token refresh
     transparently. PAT tokens (common in ~/.databrickscfg) don't expire,
     but OAuth tokens do — this ensures they're always fresh.
+
+    Raises RuntimeError if credentials are unavailable after startup.
     """
     client = WorkspaceClient()
-    return client.config.host, client.config.token
+    host = client.config.host
+    token = client.config.token
+    if not host or not token:
+        raise RuntimeError("Databricks credentials unavailable — re-check ~/.databrickscfg")
+    return host, token
