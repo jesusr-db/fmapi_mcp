@@ -106,6 +106,15 @@ def test_unsupported_type_raises_file_error():
         os.unlink(path)
 
 
+def test_binary_file_with_text_extension_raises_file_error():
+    path = make_temp(".txt", b"\xff\xfe binary content \x00\x01")
+    try:
+        with pytest.raises(FileError, match="not valid UTF-8"):
+            build_file_parts([path])
+    finally:
+        os.unlink(path)
+
+
 def test_missing_file_raises_file_error():
     with pytest.raises(FileError, match="File not found"):
         build_file_parts(["/tmp/does_not_exist_fmapi_xyz_123.txt"])

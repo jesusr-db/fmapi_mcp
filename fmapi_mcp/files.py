@@ -50,7 +50,11 @@ def build_file_parts(paths: list[str]) -> list[dict]:
                 "image_url": {"url": f"data:{mime};base64,{b64}"},
             })
         elif ext in TEXT_EXTENSIONS:
-            parts.append({"type": "text", "text": p.read_text(encoding="utf-8")})
+            try:
+                text = p.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                raise FileError(f"File is not valid UTF-8 text: {path}")
+            parts.append({"type": "text", "text": text})
         elif ext == ".pdf":
             raise FileError("PDF files are not supported — extract text first")
         else:
