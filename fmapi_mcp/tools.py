@@ -61,7 +61,7 @@ async def call_fmapi(
 
     # Build messages list (system prompt only included if provided)
     messages: list[dict] = []
-    if system:
+    if system is not None:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": content})
 
