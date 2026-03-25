@@ -4,14 +4,14 @@ call_fmapi() is the shared implementation for all four MCP tools.
 Returns the full response text (streaming accumulated) or an error string.
 No exceptions escape — every error case returns a human-readable string.
 """
-from openai import APIStatusError, AuthenticationError, NotFoundError, RateLimitError
+import httpx
 
 from fmapi_mcp.auth import get_credentials
-from fmapi_mcp.client import make_client
+from fmapi_mcp.client import stream_invocations
 from fmapi_mcp.files import FileError, build_file_parts, has_image_parts
 
-GEMINI_ENDPOINT = "databricks-gemini-2-0-flash"
-GPT4O_ENDPOINT = "databricks-gpt-4o"
+GEMINI_ENDPOINT = "databricks-gemini-2-5-flash"
+GPT4O_ENDPOINT = "databricks-gpt-5-4"
 LLAMA_ENDPOINT = "databricks-meta-llama-3-3-70b-instruct"
 
 
@@ -29,7 +29,7 @@ async def call_fmapi(
     All other errors: returns a descriptive error string (no exceptions raised).
 
     Args:
-        endpoint: FMAPI serving endpoint name (e.g., databricks-gemini-2-0-flash)
+        endpoint: FMAPI serving endpoint name (e.g., databricks-gemini-2-5-flash)
         prompt: The user query or task
         system: Optional system prompt (omitted from messages if None)
         files: Optional local file paths — images or text files
@@ -67,36 +67,25 @@ async def call_fmapi(
 
     # Re-fetch credentials on every call (handles OAuth token refresh)
     host, token = get_credentials()
-    client = make_client(host, token, endpoint)
 
-    # Build inference kwargs — omit max_tokens if not provided
-    create_kwargs: dict = {
-        "model": "placeholder",
-        "messages": messages,
-        "stream": True,
-    }
-    if max_tokens is not None:
-        create_kwargs["max_tokens"] = max_tokens
-
+    chunks: list[str] = []
     try:
-        stream = await client.chat.completions.create(**create_kwargs)
-        chunks: list[str] = []
-        try:
-            async for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    chunks.append(chunk.choices[0].delta.content)
-        except Exception as e:  # noqa: BLE001
-            partial = "".join(chunks)
-            return f"{partial}\n\n[Stream interrupted: {e}]"
+        async for chunk in stream_invocations(host, token, endpoint, messages, max_tokens):
+            chunks.append(chunk)
         return "".join(chunks)
-
-    except RateLimitError:
-        return f"Rate limited by endpoint '{endpoint}' — retry in a moment"
-    except NotFoundError:
-        return f"Endpoint '{endpoint}' not found in workspace — check the endpoint name"
-    except AuthenticationError:
-        return "Auth error — token may have expired, re-check ~/.databrickscfg"
-    except APIStatusError as e:
-        return f"API error ({e.status_code}): {e.message}"
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code
+        if status == 401:
+            return "Auth error — token may have expired, re-check ~/.databrickscfg"
+        if status == 404:
+            return f"Endpoint '{endpoint}' not found in workspace — check the endpoint name"
+        if status == 429:
+            return f"Rate limited by endpoint '{endpoint}' — retry in a moment"
+        return f"API error ({status}): {e.response.text[:200]}"
+    except httpx.RequestError as e:
+        return f"Network error: {e}"
     except Exception as e:  # noqa: BLE001
+        partial = "".join(chunks)
+        if partial:
+            return f"{partial}\n\n[Stream interrupted: {e}]"
         return f"Unexpected error: {e}"

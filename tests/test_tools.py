@@ -1,37 +1,36 @@
 # tests/test_tools.py
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+import httpx
+from unittest.mock import patch
 
 
-# Helper: create a mock async stream that yields text chunks
-def make_mock_stream(chunks: list[str]):
-    async def _gen():
-        for text in chunks:
-            choice = MagicMock()
-            choice.delta.content = text
-            chunk = MagicMock()
-            chunk.choices = [choice]
-            yield chunk
-    return _gen()
-
-
-def mock_client_with_stream(chunks: list[str]) -> MagicMock:
-    client = MagicMock()
-    client.chat.completions.create = AsyncMock(return_value=make_mock_stream(chunks))
-    return client
-
-
-GEMINI = "databricks-gemini-2-0-flash"
+GEMINI = "databricks-gemini-2-5-flash"
 LLAMA = "databricks-meta-llama-3-3-70b-instruct"
 FAKE_CREDS = ("https://test.databricks.net", "fake-token")
 
 
+def make_mock_stream(chunks: list[str]):
+    """Async generator that yields text chunks, matching stream_invocations signature."""
+    async def _gen(*args, **kwargs):
+        for text in chunks:
+            yield text
+    return _gen
+
+
+def make_failing_stream(chunks: list[str], error: Exception):
+    """Async generator that yields some chunks then raises."""
+    async def _gen(*args, **kwargs):
+        for text in chunks:
+            yield text
+        raise error
+    return _gen
+
+
 @pytest.mark.asyncio
 async def test_text_only_returns_concatenated_chunks():
-    client = mock_client_with_stream(["Hello", " world"])
     with (
         patch("fmapi_mcp.tools.get_credentials", return_value=FAKE_CREDS),
-        patch("fmapi_mcp.tools.make_client", return_value=client),
+        patch("fmapi_mcp.tools.stream_invocations", new=make_mock_stream(["Hello", " world"])),
     ):
         from fmapi_mcp.tools import call_fmapi
         result = await call_fmapi(endpoint=GEMINI, prompt="say hello")
@@ -40,56 +39,76 @@ async def test_text_only_returns_concatenated_chunks():
 
 @pytest.mark.asyncio
 async def test_system_prompt_included_as_first_message():
-    client = mock_client_with_stream(["ok"])
+    captured = {}
+
+    async def _capture(host, token, endpoint, messages, max_tokens=None):
+        captured["messages"] = messages
+        yield "ok"
+
     with (
         patch("fmapi_mcp.tools.get_credentials", return_value=FAKE_CREDS),
-        patch("fmapi_mcp.tools.make_client", return_value=client),
+        patch("fmapi_mcp.tools.stream_invocations", new=_capture),
     ):
         from fmapi_mcp.tools import call_fmapi
         await call_fmapi(endpoint=GEMINI, prompt="hi", system="You are helpful")
-    messages = client.chat.completions.create.call_args.kwargs["messages"]
-    assert messages[0] == {"role": "system", "content": "You are helpful"}
-    assert messages[1]["role"] == "user"
+
+    assert captured["messages"][0] == {"role": "system", "content": "You are helpful"}
+    assert captured["messages"][1]["role"] == "user"
 
 
 @pytest.mark.asyncio
 async def test_no_system_omits_system_message():
-    client = mock_client_with_stream(["ok"])
+    captured = {}
+
+    async def _capture(host, token, endpoint, messages, max_tokens=None):
+        captured["messages"] = messages
+        yield "ok"
+
     with (
         patch("fmapi_mcp.tools.get_credentials", return_value=FAKE_CREDS),
-        patch("fmapi_mcp.tools.make_client", return_value=client),
+        patch("fmapi_mcp.tools.stream_invocations", new=_capture),
     ):
         from fmapi_mcp.tools import call_fmapi
         await call_fmapi(endpoint=GEMINI, prompt="hi")
-    messages = client.chat.completions.create.call_args.kwargs["messages"]
-    assert all(m["role"] != "system" for m in messages)
-    assert len(messages) == 1
+
+    assert all(m["role"] != "system" for m in captured["messages"])
+    assert len(captured["messages"]) == 1
 
 
 @pytest.mark.asyncio
 async def test_max_tokens_passed_when_provided():
-    client = mock_client_with_stream(["ok"])
+    captured = {}
+
+    async def _capture(host, token, endpoint, messages, max_tokens=None):
+        captured["max_tokens"] = max_tokens
+        yield "ok"
+
     with (
         patch("fmapi_mcp.tools.get_credentials", return_value=FAKE_CREDS),
-        patch("fmapi_mcp.tools.make_client", return_value=client),
+        patch("fmapi_mcp.tools.stream_invocations", new=_capture),
     ):
         from fmapi_mcp.tools import call_fmapi
         await call_fmapi(endpoint=GEMINI, prompt="hi", max_tokens=256)
-    kwargs = client.chat.completions.create.call_args.kwargs
-    assert kwargs.get("max_tokens") == 256
+
+    assert captured["max_tokens"] == 256
 
 
 @pytest.mark.asyncio
 async def test_max_tokens_omitted_when_not_provided():
-    client = mock_client_with_stream(["ok"])
+    captured = {}
+
+    async def _capture(host, token, endpoint, messages, max_tokens=None):
+        captured["max_tokens"] = max_tokens
+        yield "ok"
+
     with (
         patch("fmapi_mcp.tools.get_credentials", return_value=FAKE_CREDS),
-        patch("fmapi_mcp.tools.make_client", return_value=client),
+        patch("fmapi_mcp.tools.stream_invocations", new=_capture),
     ):
         from fmapi_mcp.tools import call_fmapi
         await call_fmapi(endpoint=GEMINI, prompt="hi")
-    kwargs = client.chat.completions.create.call_args.kwargs
-    assert "max_tokens" not in kwargs
+
+    assert captured["max_tokens"] is None
 
 
 @pytest.mark.asyncio
@@ -111,10 +130,9 @@ async def test_llama_rejects_image_files(tmp_path):
 async def test_llama_accepts_text_files(tmp_path):
     txt = tmp_path / "notes.txt"
     txt.write_text("some text")
-    client = mock_client_with_stream(["summarized"])
     with (
         patch("fmapi_mcp.tools.get_credentials", return_value=FAKE_CREDS),
-        patch("fmapi_mcp.tools.make_client", return_value=client),
+        patch("fmapi_mcp.tools.stream_invocations", new=make_mock_stream(["summarized"])),
     ):
         from fmapi_mcp.tools import call_fmapi, LLAMA_ENDPOINT
         result = await call_fmapi(
@@ -141,15 +159,20 @@ async def test_missing_file_returns_error_string():
 async def test_image_file_included_in_user_content(tmp_path):
     img = tmp_path / "pic.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\n")
-    client = mock_client_with_stream(["described"])
+    captured = {}
+
+    async def _capture(host, token, endpoint, messages, max_tokens=None):
+        captured["messages"] = messages
+        yield "described"
+
     with (
         patch("fmapi_mcp.tools.get_credentials", return_value=FAKE_CREDS),
-        patch("fmapi_mcp.tools.make_client", return_value=client),
+        patch("fmapi_mcp.tools.stream_invocations", new=_capture),
     ):
         from fmapi_mcp.tools import call_fmapi
         await call_fmapi(endpoint=GEMINI, prompt="describe", files=[str(img)])
-    messages = client.chat.completions.create.call_args.kwargs["messages"]
-    user_content = messages[-1]["content"]
+
+    user_content = captured["messages"][-1]["content"]
     assert isinstance(user_content, list)
     assert user_content[0] == {"type": "text", "text": "describe"}
     assert user_content[1]["type"] == "image_url"
@@ -157,16 +180,19 @@ async def test_image_file_included_in_user_content(tmp_path):
 
 @pytest.mark.asyncio
 async def test_rate_limit_returns_readable_message():
-    from openai import RateLimitError
-    mock_response = MagicMock()
-    mock_response.status_code = 429
-    mock_response.headers = {}
-    err = RateLimitError("rate limited", response=mock_response, body={})
-    client = MagicMock()
-    client.chat.completions.create = AsyncMock(side_effect=err)
+    def _raise(*args, **kwargs):
+        async def _gen():
+            raise httpx.HTTPStatusError(
+                "rate limited",
+                request=httpx.Request("POST", "https://test.databricks.net"),
+                response=httpx.Response(429, text="too many requests"),
+            )
+            yield  # make it an async generator
+        return _gen()
+
     with (
         patch("fmapi_mcp.tools.get_credentials", return_value=FAKE_CREDS),
-        patch("fmapi_mcp.tools.make_client", return_value=client),
+        patch("fmapi_mcp.tools.stream_invocations", new=_raise),
     ):
         from fmapi_mcp.tools import call_fmapi
         result = await call_fmapi(endpoint=GEMINI, prompt="hi")
@@ -176,16 +202,19 @@ async def test_rate_limit_returns_readable_message():
 
 @pytest.mark.asyncio
 async def test_not_found_returns_readable_message():
-    from openai import NotFoundError
-    mock_response = MagicMock()
-    mock_response.status_code = 404
-    mock_response.headers = {}
-    err = NotFoundError("not found", response=mock_response, body={})
-    client = MagicMock()
-    client.chat.completions.create = AsyncMock(side_effect=err)
+    def _raise(*args, **kwargs):
+        async def _gen():
+            raise httpx.HTTPStatusError(
+                "not found",
+                request=httpx.Request("POST", "https://test.databricks.net"),
+                response=httpx.Response(404, text="not found"),
+            )
+            yield
+        return _gen()
+
     with (
         patch("fmapi_mcp.tools.get_credentials", return_value=FAKE_CREDS),
-        patch("fmapi_mcp.tools.make_client", return_value=client),
+        patch("fmapi_mcp.tools.stream_invocations", new=_raise),
     ):
         from fmapi_mcp.tools import call_fmapi
         result = await call_fmapi(endpoint="bad-endpoint", prompt="hi")
@@ -195,16 +224,19 @@ async def test_not_found_returns_readable_message():
 
 @pytest.mark.asyncio
 async def test_auth_error_returns_readable_message():
-    from openai import AuthenticationError
-    mock_response = MagicMock()
-    mock_response.status_code = 401
-    mock_response.headers = {}
-    err = AuthenticationError("unauthorized", response=mock_response, body={})
-    client = MagicMock()
-    client.chat.completions.create = AsyncMock(side_effect=err)
+    def _raise(*args, **kwargs):
+        async def _gen():
+            raise httpx.HTTPStatusError(
+                "unauthorized",
+                request=httpx.Request("POST", "https://test.databricks.net"),
+                response=httpx.Response(401, text="unauthorized"),
+            )
+            yield
+        return _gen()
+
     with (
         patch("fmapi_mcp.tools.get_credentials", return_value=FAKE_CREDS),
-        patch("fmapi_mcp.tools.make_client", return_value=client),
+        patch("fmapi_mcp.tools.stream_invocations", new=_raise),
     ):
         from fmapi_mcp.tools import call_fmapi
         result = await call_fmapi(endpoint=GEMINI, prompt="hi")
@@ -213,30 +245,38 @@ async def test_auth_error_returns_readable_message():
 
 @pytest.mark.asyncio
 async def test_empty_string_system_is_included_not_omitted():
-    client = mock_client_with_stream(["ok"])
+    captured = {}
+
+    async def _capture(host, token, endpoint, messages, max_tokens=None):
+        captured["messages"] = messages
+        yield "ok"
+
     with (
         patch("fmapi_mcp.tools.get_credentials", return_value=FAKE_CREDS),
-        patch("fmapi_mcp.tools.make_client", return_value=client),
+        patch("fmapi_mcp.tools.stream_invocations", new=_capture),
     ):
         from fmapi_mcp.tools import call_fmapi
         await call_fmapi(endpoint=GEMINI, prompt="hi", system="")
-    messages = client.chat.completions.create.call_args.kwargs["messages"]
-    assert messages[0] == {"role": "system", "content": ""}
-    assert messages[1]["role"] == "user"
+
+    assert captured["messages"][0] == {"role": "system", "content": ""}
+    assert captured["messages"][1]["role"] == "user"
 
 
 @pytest.mark.asyncio
 async def test_api_status_error_returns_readable_message():
-    from openai import APIStatusError
-    mock_response = MagicMock()
-    mock_response.status_code = 500
-    mock_response.headers = {}
-    err = APIStatusError("server error", response=mock_response, body={})
-    client = MagicMock()
-    client.chat.completions.create = AsyncMock(side_effect=err)
+    def _raise(*args, **kwargs):
+        async def _gen():
+            raise httpx.HTTPStatusError(
+                "server error",
+                request=httpx.Request("POST", "https://test.databricks.net"),
+                response=httpx.Response(500, text="internal server error"),
+            )
+            yield
+        return _gen()
+
     with (
         patch("fmapi_mcp.tools.get_credentials", return_value=FAKE_CREDS),
-        patch("fmapi_mcp.tools.make_client", return_value=client),
+        patch("fmapi_mcp.tools.stream_invocations", new=_raise),
     ):
         from fmapi_mcp.tools import call_fmapi
         result = await call_fmapi(endpoint=GEMINI, prompt="hi")
@@ -246,19 +286,9 @@ async def test_api_status_error_returns_readable_message():
 
 @pytest.mark.asyncio
 async def test_stream_interruption_returns_partial_with_annotation():
-    async def _failing_stream():
-        choice = MagicMock()
-        choice.delta.content = "partial"
-        chunk = MagicMock()
-        chunk.choices = [choice]
-        yield chunk
-        raise RuntimeError("connection reset")
-
-    client = MagicMock()
-    client.chat.completions.create = AsyncMock(return_value=_failing_stream())
     with (
         patch("fmapi_mcp.tools.get_credentials", return_value=FAKE_CREDS),
-        patch("fmapi_mcp.tools.make_client", return_value=client),
+        patch("fmapi_mcp.tools.stream_invocations", new=make_failing_stream(["partial"], RuntimeError("connection reset"))),
     ):
         from fmapi_mcp.tools import call_fmapi
         result = await call_fmapi(endpoint=GEMINI, prompt="hi")

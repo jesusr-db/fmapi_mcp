@@ -1,8 +1,8 @@
 """MCP server entry point for fmapi-mcp.
 
 Registers four tools:
-  ask-gemini  → databricks-gemini-2-0-flash           (text + images)
-  ask-gpt4o   → databricks-gpt-4o                     (text + images)
+  ask-gemini  → databricks-gemini-2-5-flash            (text + images)
+  ask-gpt4o   → databricks-gpt-5-4                     (text + images)
   ask-llama   → databricks-meta-llama-3-3-70b-instruct (text only)
   ask-fmapi   → any FMAPI endpoint by name             (generic)
 
