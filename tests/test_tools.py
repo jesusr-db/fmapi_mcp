@@ -212,6 +212,39 @@ async def test_auth_error_returns_readable_message():
 
 
 @pytest.mark.asyncio
+async def test_empty_string_system_is_included_not_omitted():
+    client = mock_client_with_stream(["ok"])
+    with (
+        patch("fmapi_mcp.tools.get_credentials", return_value=FAKE_CREDS),
+        patch("fmapi_mcp.tools.make_client", return_value=client),
+    ):
+        from fmapi_mcp.tools import call_fmapi
+        await call_fmapi(endpoint=GEMINI, prompt="hi", system="")
+    messages = client.chat.completions.create.call_args.kwargs["messages"]
+    assert messages[0] == {"role": "system", "content": ""}
+    assert messages[1]["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_api_status_error_returns_readable_message():
+    from openai import APIStatusError
+    mock_response = MagicMock()
+    mock_response.status_code = 500
+    mock_response.headers = {}
+    err = APIStatusError("server error", response=mock_response, body={})
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(side_effect=err)
+    with (
+        patch("fmapi_mcp.tools.get_credentials", return_value=FAKE_CREDS),
+        patch("fmapi_mcp.tools.make_client", return_value=client),
+    ):
+        from fmapi_mcp.tools import call_fmapi
+        result = await call_fmapi(endpoint=GEMINI, prompt="hi")
+    assert "500" in result
+    assert "API error" in result
+
+
+@pytest.mark.asyncio
 async def test_stream_interruption_returns_partial_with_annotation():
     async def _failing_stream():
         choice = MagicMock()
